@@ -24,7 +24,7 @@ data RpcRequest = RpcRequest
     , method  :: !Text
     , params  :: !(Maybe Value)
     , rpcId   :: !(Maybe Value)
-    } deriving (Generic, Show)
+    } deriving (Generic, Show, Eq)
 
 instance FromJSON RpcRequest
 instance ToJSON RpcRequest
@@ -35,7 +35,7 @@ data RpcResponse = RpcResponse
     , result     :: !(Maybe Value)
     , resError   :: !(Maybe Value)
     , resId      :: !(Maybe Value)
-    } deriving (Generic, Show)
+    } deriving (Generic, Show, Eq)
 
 instance FromJSON RpcResponse
 instance ToJSON RpcResponse

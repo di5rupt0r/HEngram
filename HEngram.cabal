@@ -9,10 +9,11 @@ maintainer:         antigravity@deepmind.com
 category:           Web
 build-type:         Simple
 
-executable hengram
-    main-is:          Main.hs
-    other-modules:    Types
+-- ── Library (shared between exe and tests) ────────────────────────────────────
+library
+    exposed-modules:  Types
                     , Redis
+                    , App
     build-depends:    base >= 4.17 && < 5
                     , servant
                     , servant-server
@@ -34,7 +35,7 @@ executable hengram
                     , binary
     hs-source-dirs:   src
     default-language: Haskell2010
-    ghc-options:      -Wall -O2 -threaded -rtsopts -with-rtsopts=-N
+    ghc-options:      -Wall -O2
     default-extensions:
         DataKinds
         DeriveGeneric
@@ -44,3 +45,45 @@ executable hengram
         TypeFamilies
         ScopedTypeVariables
         MultiParamTypeClasses
+
+-- ── Executable ────────────────────────────────────────────────────────────────
+executable hengram
+    main-is:          Main.hs
+    build-depends:    base >= 4.17 && < 5
+                    , HEngram
+                    , warp
+                    , stm
+                    , containers
+    hs-source-dirs:   app
+    default-language: Haskell2010
+    ghc-options:      -Wall -O2 -threaded -rtsopts -with-rtsopts=-N
+    default-extensions:
+        OverloadedStrings
+
+-- ── Test Suite ────────────────────────────────────────────────────────────────
+test-suite hengram-test
+    type:             exitcode-stdio-1.0
+    main-is:          Spec.hs
+    other-modules:    TypesSpec
+                    , AppSpec
+                    , RedisSpec
+    build-depends:    base >= 4.17 && < 5
+                    , HEngram
+                    , hspec
+                    , hspec-wai
+                    , aeson
+                    , stm
+                    , containers
+                    , hedis
+                    , wai
+                    , wai-extra
+                    , http-types
+                    , text
+                    , bytestring
+                    , binary
+    hs-source-dirs:   test
+    default-language: Haskell2010
+    ghc-options:      -Wall -threaded -rtsopts -with-rtsopts=-N
+    default-extensions:
+        OverloadedStrings
+        ScopedTypeVariables
