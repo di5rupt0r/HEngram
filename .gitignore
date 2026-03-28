@@ -1,0 +1,18 @@
+# Haskell build artifacts
+dist-newstyle/
+dist/
+*.hi
+*.o
+*.dyn_hi
+*.dyn_o
+.stack-work/
+
+# Cabal sandbox
+.cabal-sandbox/
+cabal.sandbox.config
+cabal.project.local
+
+# GHC generated files
+*.prof
+*.hp
+*.eventlog
