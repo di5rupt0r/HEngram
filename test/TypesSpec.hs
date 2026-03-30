@@ -22,7 +22,7 @@ spec = do
             decode (encode req) `shouldBe` Just req
 
         it "parses a valid JSON-RPC 2.0 object" $ do
-            let raw = "{\"jsonrpc\":\"2.0\",\"method\":\"ping\",\"params\":null,\"rpcId\":null}"
+            let raw = "{\"jsonrpc\":\"2.0\",\"method\":\"ping\",\"params\":null,\"id\":null}"
             (decode raw :: Maybe RpcRequest) `shouldNotBe` Nothing
 
         it "fails to parse when 'method' is missing" $ do
@@ -58,5 +58,5 @@ spec = do
                 res  = RpcResponse "2.0" Nothing (Just errV) (Just (Number 1))
             case decode (encode res) :: Maybe Value of
                 Just (Object m) ->
-                    KM.lookup "resError" m `shouldNotBe` Nothing
+                    KM.lookup "error" m `shouldNotBe` Nothing
                 _ -> expectationFailure "expected a JSON object"

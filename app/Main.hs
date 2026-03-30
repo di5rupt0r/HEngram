@@ -7,11 +7,12 @@ import qualified Data.Map.Strict as Map
 import Network.Wai.Handler.Warp (run)
 
 import App (app)
+import Embeddings (withLlamaServer)
 import Redis (initRedis, createRediSearchIndex)
 import Types (ServerState (..))
 
 main :: IO ()
-main = do
+main = withLlamaServer $ do
     putStrLn "Initializing HEngram: Pure Functional MCP Server..."
 
     conn <- initRedis

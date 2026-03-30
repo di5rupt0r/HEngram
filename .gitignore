@@ -16,3 +16,7 @@ cabal.project.local
 *.prof
 *.hp
 *.eventlog
+
+# Binaries and Models
+bin/
+models/
