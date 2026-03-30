@@ -82,3 +82,35 @@ type MessagesAPI =
 
 messagesProxy :: Proxy MessagesAPI
 messagesProxy = Proxy
+
+-- | Represents one outgoing relationship from a node
+data RelatedEdge = RelatedEdge
+    { edgeTargetId :: !Text
+    , edgeRelType  :: !Text
+    } deriving (Show, Generic)
+
+instance ToJSON RelatedEdge where
+    toJSON (RelatedEdge tid rType) =
+        object [ "target_id" .= tid
+               , "rel_type"  .= rType
+               ]
+
+-- | Represents one search result with metadata and context expansion
+data SearchResult = SearchResult
+    { srId       :: !Text
+    , srDomain   :: !Text
+    , srNodeType :: !Text
+    , srContent  :: !Text
+    , srScore    :: !(Maybe Double)
+    , srRelated  :: ![RelatedEdge]
+    } deriving (Show, Generic)
+
+instance ToJSON SearchResult where
+    toJSON (SearchResult sid sDom sType sCont sScore sRel) =
+        object $ [ "id"         .= sid
+                 , "domain"     .= sDom
+                 , "node_type"  .= sType
+                 , "content"    .= sCont
+                 , "related"    .= sRel
+                 ]
+                 ++ [ "score" .= s | Just s <- [sScore] ]

@@ -12,15 +12,18 @@ module App
 import Control.Concurrent.STM
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (runReaderT, ask)
-import Data.Aeson (encode, FromJSON(..), (.:), withObject, (.=), object, Value(..), Object)
+import Data.Aeson (encode, (.=), object, Value(..), Object)
+import qualified Data.Aeson as Aeson
 import Data.Binary.Builder (Builder, fromLazyByteString, fromByteString)
+import qualified Data.ByteString.Lazy as LBS
+import Data.ByteString (ByteString)
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.Aeson.Key as K
 import qualified Data.Map.Strict as Map
 import qualified Data.Text as T
 import Data.Text (Text)
 import qualified Data.Text.Encoding as TE
-import Data.UUID (toText, fromText)
+import Data.UUID (toText)
 import Data.UUID.V4 (nextRandom)
 import Network.Wai (Middleware, pathInfo)
 import Network.Wai.EventSource (ServerEvent (..), eventSourceAppIO)
@@ -96,6 +99,17 @@ messagesHandler sid req = do
                                         , "required" .= (["source_id", "target_id", "rel_type"] :: [Text])
                                         ]
                                     ]
+                                , object
+                                    [ "name" .= ("engram_recall" :: Text)
+                                    , "description" .= ("Retrieve a specific node from the knowledge graph by ID, including its full content and all typed outgoing relationships" :: Text)
+                                    , "inputSchema" .= object
+                                        [ "type" .= ("object" :: Text)
+                                        , "properties" .= object
+                                            [ "node_id" .= object ["type" .= ("string" :: Text)]
+                                            ]
+                                        , "required" .= (["node_id"] :: [Text])
+                                        ]
+                                    ]
                                 ]
                             ]))
                         Nothing (rpcId req)
@@ -161,11 +175,31 @@ handleToolCall state queue req = do
                     case reply of
                         Right (MultiBulk (Just (Bulk (Just _count) : results))) -> do
                             -- Parse results and fetch edges for each
-                            formatted <- liftIO $ formatHybridResults (redisConn state) results
-                            let res = toolSuccess req formatted
+                            searchResults <- liftIO $ parseHybridResults (redisConn state) results
+                            let jsonRes = T.pack $ T.unpack $ TE.decodeUtf8 $ LBS.toStrict $ Aeson.encode searchResults
+                                res = toolSuccess req jsonRes
                             liftIO $ atomically $ writeTQueue queue (mkEvent res)
                         _ -> sendError queue req "RediSearch hybrid query failed"
                 Nothing -> sendError queue req "Missing required argument 'query'"
+        
+        Just ("engram_recall", args) -> do
+            let mNodeId = getString "node_id" args
+            case mNodeId of
+                Just nodeId -> do
+                    let key = TE.encodeUtf8 nodeId
+                    reply <- liftIO $ runRedis (redisConn state) $ sendRequest ["HGETALL", key]
+                    case reply of
+                        Right (MultiBulk (Just fields)) | not (null fields) -> do
+                            let cont  = lookupHGetAll "content" fields
+                                dom   = lookupHGetAll "domain" fields
+                                nType = lookupHGetAll "type" fields
+                            edges <- liftIO $ fetchEdges (redisConn state) key
+                            let recallResult = SearchResult nodeId dom nType cont Nothing edges
+                                jsonRes = T.pack $ T.unpack $ TE.decodeUtf8 $ LBS.toStrict $ Aeson.encode [recallResult]
+                                res = toolSuccess req jsonRes
+                            liftIO $ atomically $ writeTQueue queue (mkEvent res)
+                        _ -> sendError queue req $ "Node not found: " <> nodeId
+                Nothing -> sendError queue req "Missing required argument 'node_id'"
         
         Just ("engram_link", args) -> do
             let mLink = (,,) <$> (getString "source_id" args)
@@ -173,7 +207,7 @@ handleToolCall state queue req = do
                              <*> (getString "rel_type" args)
             case mLink of
                 Just (src, tgt, rel) -> do
-                    liftIO $ linkNodes (redisConn state) (TE.encodeUtf8 src) (TE.encodeUtf8 tgt) (TE.encodeUtf8 rel)
+                    _ <- liftIO $ linkNodes (redisConn state) (TE.encodeUtf8 src) (TE.encodeUtf8 tgt) (TE.encodeUtf8 rel)
                     let res = toolSuccess req $ "Successfully linked " <> src <> " -> " <> tgt <> " (" <> rel <> ")"
                     liftIO $ atomically $ writeTQueue queue (mkEvent res)
                 Nothing -> sendError queue req "Missing required arguments for engram_link"
@@ -206,34 +240,53 @@ sendError queue req msg = do
             (rpcId req)
     liftIO $ atomically $ writeTQueue queue (mkEvent res)
 
-formatHybridResults :: Database.Redis.Connection -> [Reply] -> IO Text
-formatHybridResults _ [] = return "No results found."
-formatHybridResults conn replies = do
-    formattedList <- mapM (formatOne conn) (pairs replies)
-    return $ T.unlines formattedList
+-- | Parse FT.SEARCH results into SearchResult objects
+parseHybridResults :: Connection -> [Reply] -> IO [SearchResult]
+parseHybridResults _ [] = return []
+parseHybridResults conn replies = mapM (parseOne conn) (pairs replies)
   where
     pairs [] = []
     pairs (i:f:rs) = (i,f) : pairs rs
     pairs _ = []
 
-    formatOne c (Bulk (Just key), MultiBulk (Just fields)) = do
-        let content = lookupField "content" fields
-            score   = lookupField "score" fields
-        -- Fetch Edges
-        edgeReply <- runRedis c $ sendRequest ["SMEMBERS", "engram:edges:" <> key]
-        let related = case edgeReply of
-                Right (MultiBulk (Just ms)) -> 
-                    let ids = [TE.decodeUtf8 bid | Bulk (Just bid) <- ms]
-                    in if null ids then "" else "\n   └ Related: " <> T.intercalate ", " ids
-                _ -> ""
-        return $ "[" <> TE.decodeUtf8 key <> "] (Score: " <> score <> "): " <> content <> related
-    formatOne _ _ = return "Malformed result"
+    parseOne c (Bulk (Just key), MultiBulk (Just fields)) = do
+        let cont  = lookupHGetAll "content" fields
+            dom   = lookupHGetAll "domain" fields
+            nType = lookupHGetAll "type" fields
+            sText = lookupHGetAll "score" fields
+            score = case reads (T.unpack sText) of
+                [(val, "")] -> Just val
+                _           -> Nothing
+        edges <- fetchEdges c key
+        return $ SearchResult (TE.decodeUtf8 key) dom nType cont score edges
+    parseOne _ _ = return $ SearchResult "malformed" "" "" "" Nothing []
 
-    lookupField _ [] = "n/a"
-    lookupField target (Bulk (Just f) : Bulk (Just v) : fs)
-        | f == target = TE.decodeUtf8 v
-        | otherwise   = lookupField target fs
-    lookupField t (_:fs) = lookupField t fs
+-- | Fetch all edges for a node
+fetchEdges :: Connection -> ByteString -> IO [RelatedEdge]
+fetchEdges conn key = do
+    reply <- runRedis conn $ sendRequest ["SMEMBERS", "engram:edges:" <> key]
+    case reply of
+        Right (MultiBulk (Just ms)) -> do
+            let targets = [tid | Bulk (Just tid) <- ms]
+            mapM (fetchEdge conn key) targets
+        _ -> return []
+
+-- | Fetch relationship type for a specific edge
+fetchEdge :: Connection -> ByteString -> ByteString -> IO RelatedEdge
+fetchEdge conn src tgt = do
+    reply <- runRedis conn $ sendRequest ["HGET", "engram:edge:data:" <> src <> ":" <> tgt, "type"]
+    let relType = case reply of
+            Right (Bulk (Just t)) -> TE.decodeUtf8 t
+            _                     -> "RELATED"
+    return $ RelatedEdge (TE.decodeUtf8 tgt) relType
+
+-- | Generic HSET/FT.SEARCH field lookup
+lookupHGetAll :: ByteString -> [Reply] -> Text
+lookupHGetAll _ [] = ""
+lookupHGetAll target (Bulk (Just f) : Bulk (Just v) : fs)
+    | f == target = TE.decodeUtf8 v
+    | otherwise   = lookupHGetAll target fs
+lookupHGetAll t (_:fs) = lookupHGetAll t fs
 
 -- ── Servant sub-application (/messages) ─────────────────────────────────────
 
