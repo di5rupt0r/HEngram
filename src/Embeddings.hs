@@ -25,7 +25,7 @@ withLlamaServer action = do
             [ "LD_LIBRARY_PATH=./bin"
             , "./bin/llama-server"
             , "-m", "./models/nomic-embed-text-v1.5.f16.gguf"
-            , "--port", "8080"
+            , "--port", "8081"
             , "--embedding"
             , "--log-disable"
             ]
@@ -63,21 +63,27 @@ ensureLlamaServer = do
         let mUrl = "https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF/resolve/main/nomic-embed-text-v1.5.f16.gguf"
         callProcess "curl" ["-L", "-o", "./models/nomic-embed-text-v1.5.f16.gguf", mUrl]
 
--- | JSON Response structure for native llama-server Embedding API.
-newtype EmbeddingResponse = EmbeddingResponse { embedding :: [Float] } deriving (Show, Generic)
+-- Represents one entry in the "data" array
+data EmbeddingData = EmbeddingData { embedding :: [Float] } deriving (Show, Generic)
+instance FromJSON EmbeddingData where
+    parseJSON = withObject "EmbeddingData" $ \v -> EmbeddingData <$> v .: "embedding"
 
+-- Top-level OpenAI response wrapper
+data EmbeddingResponse = EmbeddingResponse { embData :: [EmbeddingData] } deriving (Show, Generic)
 instance FromJSON EmbeddingResponse where
-    parseJSON = withObject "EmbeddingResponse" $ \v -> do
-        EmbeddingResponse <$> v .: "embedding"
+    parseJSON = withObject "EmbeddingResponse" $ \v -> EmbeddingResponse <$> v .: "data"
 
 -- | Fetch embedding from the local llama-server.
 getEmbedding :: Text -> IO [Float]
 getEmbedding txt = do
     let request
-          = setRequestPath "/embedding"
+          = setRequestPath "/v1/embeddings"
           $ setRequestMethod "POST"
-          $ setRequestBodyJSON (object [ "content" .= txt ])
-          $ "http://localhost:8080"
+          $ setRequestBodyJSON (object [ "input" .= txt, "model" .= ("nomic-embed-text-v1.5" :: Text) ])
+          $ "http://localhost:8081"
 
     response <- httpJSON request
-    return $ embedding (getResponseBody response)
+    let res = getResponseBody response
+    case embData res of
+        (d:_) -> return $ embedding d
+        []    -> ioError $ userError "llama-server returned empty data array in /v1/embeddings response"
