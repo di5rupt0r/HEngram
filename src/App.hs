@@ -26,7 +26,7 @@ import qualified Data.Text.Encoding as TE
 import Text.Read (readMaybe)
 import Data.List (maximumBy)
 import Data.Ord (comparing)
-import Data.Maybe (isJust)
+import Data.Maybe (isJust, mapMaybe)
 import Data.UUID (toText)
 import Data.UUID.V4 (nextRandom)
 import Network.Wai (Middleware, pathInfo)
@@ -379,8 +379,11 @@ handleToolCall state queue req = do
                                             _ -> return ()
                                         return ()
                                     
-                                    let updatedFieldNames = [k | (k, _) <- finalUpd]
-                                        msg = "Successfully patched node " <> nodeId <> ". Updated fields: " <> T.intercalate ", " updatedFieldNames
+                                    let displayField "vector" = Nothing
+                                        displayField "type"   = Just "node_type"
+                                        displayField k        = Just k
+                                        displayNames = mapMaybe displayField [k | (k, _) <- finalUpd]
+                                        msg = "Successfully patched node " <> nodeId <> ". Updated fields: " <> T.intercalate ", " displayNames
                                     let res = toolSuccess req msg
                                     liftIO $ atomically $ writeTQueue queue (mkEvent res)
                                 else do
