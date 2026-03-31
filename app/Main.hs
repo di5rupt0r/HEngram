@@ -10,6 +10,9 @@ import App (app)
 import Embeddings (withLlamaServer)
 import Redis (initRedis, createRediSearchIndex)
 import Types (ServerState (..))
+import System.Environment (lookupEnv)
+import Data.Maybe (fromMaybe)
+import Text.Read (readMaybe)
 
 main :: IO ()
 main = withLlamaServer $ do
@@ -23,8 +26,11 @@ main = withLlamaServer $ do
         Left  _ -> putStrLn "RediSearch index already exists (or Redis error) — continuing."
         Right _ -> putStrLn "RediSearch index 'engram_index' created (384-dim COSINE FLOAT32)."
 
+    thresholdStr <- lookupEnv "HENGRAM_DEDUP_THRESHOLD"
+    let threshold = fromMaybe 0.12 (thresholdStr >>= readMaybe)
+
     sessionMap <- newTVarIO Map.empty
-    let state = ServerState conn sessionMap
+    let state = ServerState conn sessionMap threshold
         port  = 8765 :: Int
 
     putStrLn $ "HEngram serving on http://localhost:" <> show port

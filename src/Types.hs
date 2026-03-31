@@ -66,8 +66,9 @@ instance ToJSON RpcResponse where
 
 -- | Server State record (shared across all handlers)
 data ServerState = ServerState
-    { redisConn :: !Connection
-    , sessions  :: !(TVar (Map SessionId (TQueue ServerEvent)))
+    { redisConn      :: !Connection
+    , sessions       :: !(TVar (Map SessionId (TQueue ServerEvent)))
+    , dedupThreshold :: !Double
     }
 
 -- | Application Monad: Reader over ServerState, lifts into Servant Handler
@@ -113,4 +114,15 @@ instance ToJSON SearchResult where
                  , "content"    .= sCont
                  , "related"    .= sRel
                  ]
-                 ++ [ "score" .= s | Just s <- [sScore] ]
+
+-- | Final response sent to the LLM for engram_search
+data SearchResponse = SearchResponse
+    { fallbackUsed :: !Bool
+    , results      :: ![SearchResult]
+    } deriving (Show, Generic)
+
+instance ToJSON SearchResponse where
+    toJSON (SearchResponse fUsed res) =
+        object [ "fallback_used" .= fUsed
+               , "results"       .= res
+               ]

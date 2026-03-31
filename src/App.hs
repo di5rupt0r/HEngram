@@ -23,6 +23,10 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Text as T
 import Data.Text (Text)
 import qualified Data.Text.Encoding as TE
+import Text.Read (readMaybe)
+import Data.List (maximumBy)
+import Data.Ord (comparing)
+import Data.Maybe (isJust)
 import Data.UUID (toText)
 import Data.UUID.V4 (nextRandom)
 import Network.Wai (Middleware, pathInfo)
@@ -33,7 +37,7 @@ import Servant
 import Types
 import Embeddings (getEmbedding)
 import Redis (normalizeL2, vectorToByteString, linkNodes)
-import Database.Redis (runRedis, sendRequest, Reply(..), Redis, Connection)
+import Database.Redis (runRedis, sendRequest, Reply(..), Redis, Connection, exists)
 
 -- ── AppM natural transformation ─────────────────────────────────────────────
 
@@ -131,6 +135,59 @@ messagesHandler sid req = do
 
 -- ── Tool Call Dispatcher ──────────────────────────────────────────────────
 
+canonicalNodeTypes :: [Text]
+canonicalNodeTypes =
+  [ "fact", "preference", "project", "person", "decision"
+  , "constraint", "event", "concept", "procedure", "summary" ]
+
+canonicalDomains :: [Text]
+canonicalDomains =
+  [ "personal", "swe", "infra", "health", "finance"
+  , "recon", "fitness", "research", "misc" ]
+
+domainAliases :: [(Text, Text)]
+domainAliases =
+  [ ("software", "swe"), ("software engineering", "swe"), ("dev", "swe")
+  , ("coding", "swe"), ("programacao", "swe"), ("desenvolvimento", "swe")
+  , ("infrastructure", "infra"), ("servidor", "infra"), ("server", "infra")
+  , ("saude", "health"), ("treino", "fitness"), ("gym", "fitness")
+  , ("bodybuilding", "fitness"), ("academia", "fitness")
+  , ("seguranca", "recon"), ("security", "recon"), ("pentest", "recon")
+  , ("pesquisa", "research"), ("estudo", "research")
+  , ("geral", "misc"), ("general", "misc"), ("outros", "misc")
+  ]
+
+overlapScore :: Text -> Text -> Double
+overlapScore t1 t2 =
+    let s1 = T.unpack $ T.toLower $ T.strip t1
+        s2 = T.unpack $ T.toLower $ T.strip t2
+        shared = length [c | c <- s1, c `elem` s2]
+        maxLen = max (length s1) (length s2)
+    in if maxLen == 0 then 0 else fromIntegral shared / fromIntegral maxLen
+
+normalizeNodeType :: Text -> Text
+normalizeNodeType input =
+    let normalized = T.toLower $ T.strip input
+    in if normalized `elem` canonicalNodeTypes
+       then normalized
+       else 
+           let scores = [(overlapScore normalized c, c) | c <- canonicalNodeTypes]
+               bestMatch = snd $ maximumBy (comparing fst) scores
+           in bestMatch
+
+normalizeDomain :: Text -> Text
+normalizeDomain input =
+    let normalized = T.toLower $ T.strip input
+    in case lookup normalized domainAliases of
+        Just alias -> alias
+        Nothing -> 
+            if normalized `elem` canonicalDomains
+            then normalized
+            else
+                let scores = [(overlapScore normalized c, c) | c <- canonicalDomains]
+                    bestMatch = snd $ maximumBy (comparing fst) scores
+                in bestMatch
+
 handleToolCall :: ServerState -> TQueue ServerEvent -> RpcRequest -> AppM ()
 handleToolCall state queue req = do
     let mArgs = do
@@ -146,16 +203,37 @@ handleToolCall state queue req = do
                              <*> (getString "node_type" args)
             case mData of
                 Just (dom, cont, nType) -> do
+                    let normDom   = normalizeDomain dom
+                        normType  = normalizeNodeType nType
                     rawVec <- liftIO $ getEmbedding cont
                     let vec = vectorToByteString $ normalizeL2 $ take 384 rawVec
-                    uuid <- liftIO nextRandom
-                    let key = "engram:node:" <> toText uuid
-                    liftIO $ runRedis (redisConn state) $ do
-                        _ <- (sendRequest ["HSET", TE.encodeUtf8 key, "domain", TE.encodeUtf8 dom, "type", TE.encodeUtf8 nType, "content", TE.encodeUtf8 cont, "vector", vec] :: Redis (Either Reply Reply))
-                        _ <- (sendRequest ["SADD", "manifest:domain:" <> TE.encodeUtf8 dom, TE.encodeUtf8 key] :: Redis (Either Reply Reply))
-                        return ()
-                    let res = toolSuccess req $ "Successfully memorized into domain '" <> dom <> "' with ID " <> toText uuid
-                    liftIO $ atomically $ writeTQueue queue (mkEvent res)
+                    
+                    -- Task 4: Semantic Deduplication
+                    let dedupQuery = "(@domain:{" <> normDom <> "}) [KNN 3 @vector $vec AS __dup_score__]"
+                    dedupReply <- liftIO $ runRedis (redisConn state) $
+                        sendRequest ["FT.SEARCH", "engram_index", TE.encodeUtf8 dedupQuery, "PARAMS", "2", "vec", vec, "SORTBY", "__dup_score__", "ASC", "LIMIT", "0", "1", "DIALECT", "2"]
+                    
+                    let mDuplicate = case dedupReply of
+                            Right (MultiBulk (Just (Bulk (Just count) : Bulk (Just key) : MultiBulk (Just fields) : _))) | count /= "0" ->
+                                let sText = lookupHGetAll "__dup_score__" fields
+                                in case readMaybe (T.unpack sText) of
+                                    Just s  -> Just (TE.decodeUtf8 key, s)
+                                    _       -> Nothing
+                            _ -> Nothing
+                    
+                    case mDuplicate of
+                        Just (dupId, score) | score < (dedupThreshold state) -> do
+                            let res = toolSuccess req $ "Duplicate detected: this knowledge already exists as node " <> dupId <> " (similarity score: " <> T.pack (show score) <> "). Use engram_link to connect related concepts or engram_recall to inspect the existing node."
+                            liftIO $ atomically $ writeTQueue queue (mkEvent res)
+                        _ -> do
+                            uuid <- liftIO nextRandom
+                            let key = "engram:node:" <> toText uuid
+                            liftIO $ runRedis (redisConn state) $ do
+                                _ <- (sendRequest ["HSET", TE.encodeUtf8 key, "domain", TE.encodeUtf8 normDom, "type", TE.encodeUtf8 normType, "content", TE.encodeUtf8 cont, "vector", vec] :: Redis (Either Reply Reply))
+                                _ <- (sendRequest ["SADD", "manifest:domain:" <> TE.encodeUtf8 normDom, TE.encodeUtf8 key] :: Redis (Either Reply Reply))
+                                return ()
+                            let res = toolSuccess req $ "Successfully memorized into domain '" <> normDom <> "' with node_type '" <> normType <> "' and ID " <> toText uuid
+                            liftIO $ atomically $ writeTQueue queue (mkEvent res)
                 Nothing -> sendError queue req "Missing required arguments for engram_memorize"
         
         Just ("engram_search", args) -> do
@@ -165,21 +243,38 @@ handleToolCall state queue req = do
                     rawVec <- liftIO $ getEmbedding query
                     let vec = vectorToByteString $ normalizeL2 $ take 384 rawVec
                         domain = getString "domain" args
-                        hybridQuery = case domain of
+                        
+                        -- Phase 1 search
+                        hybridQuery1 = case domain of
                             Just d  -> "(@domain:{" <> d <> "}) ((@content:($q)) | ([KNN 5 @vector $vec AS score]))"
                             Nothing -> "(@content:($q)) | ([KNN 5 @vector $vec AS score])"
                     
-                    reply <- liftIO $ runRedis (redisConn state) $
-                        sendRequest ["FT.SEARCH", "engram_index", TE.encodeUtf8 hybridQuery, "PARAMS", "4", "q", TE.encodeUtf8 query, "vec", vec, "DIALECT", "2"]
+                    reply1 <- liftIO $ runRedis (redisConn state) $
+                        sendRequest ["FT.SEARCH", "engram_index", TE.encodeUtf8 hybridQuery1, "PARAMS", "4", "q", TE.encodeUtf8 query, "vec", vec, "DIALECT", "2"]
                     
-                    case reply of
-                        Right (MultiBulk (Just (Bulk (Just _count) : results))) -> do
-                            -- Parse results and fetch edges for each
-                            searchResults <- liftIO $ parseHybridResults (redisConn state) results
-                            let jsonRes = T.pack $ T.unpack $ TE.decodeUtf8 $ LBS.toStrict $ Aeson.encode searchResults
-                                res = toolSuccess req jsonRes
-                            liftIO $ atomically $ writeTQueue queue (mkEvent res)
-                        _ -> sendError queue req "RediSearch hybrid query failed"
+                    (finalResults, fUsed) <- case reply1 of
+                        Right (MultiBulk (Just (Bulk (Just count) : resList))) | count /= "0" -> do
+                            rs <- liftIO $ parseHybridResults (redisConn state) resList
+                            return (rs, False)
+                        _ | isJust domain -> do
+                            -- Phase 2 search: Fallback to global
+                            let hybridQuery2 = "(@content:($q)) | ([KNN 5 @vector $vec AS score])"
+                            reply2 <- liftIO $ runRedis (redisConn state) $
+                                sendRequest ["FT.SEARCH", "engram_index", TE.encodeUtf8 hybridQuery2, "PARAMS", "4", "q", TE.encodeUtf8 query, "vec", vec, "DIALECT", "2"]
+                            case reply2 of
+                                Right (MultiBulk (Just (Bulk (Just _) : resList2))) -> do
+                                    rs <- liftIO $ parseHybridResults (redisConn state) resList2
+                                    return (rs, True)
+                                _ -> return ([], False)
+                        Right (MultiBulk (Just (Bulk (Just _) : resList3))) -> do
+                                rs <- liftIO $ parseHybridResults (redisConn state) resList3
+                                return (rs, False)
+                        _ -> return ([], False)
+
+                    let searchResp = SearchResponse fUsed finalResults
+                        jsonRes = T.pack $ T.unpack $ TE.decodeUtf8 $ LBS.toStrict $ Aeson.encode searchResp
+                        res = toolSuccess req jsonRes
+                    liftIO $ atomically $ writeTQueue queue (mkEvent res)
                 Nothing -> sendError queue req "Missing required argument 'query'"
         
         Just ("engram_recall", args) -> do
@@ -207,9 +302,23 @@ handleToolCall state queue req = do
                              <*> (getString "rel_type" args)
             case mLink of
                 Just (src, tgt, rel) -> do
-                    _ <- liftIO $ linkNodes (redisConn state) (TE.encodeUtf8 src) (TE.encodeUtf8 tgt) (TE.encodeUtf8 rel)
-                    let res = toolSuccess req $ "Successfully linked " <> src <> " -> " <> tgt <> " (" <> rel <> ")"
-                    liftIO $ atomically $ writeTQueue queue (mkEvent res)
+                    let srcKey = TE.encodeUtf8 src
+                        tgtKey = TE.encodeUtf8 tgt
+                    
+                    existsReply <- liftIO $ runRedis (redisConn state) $ do
+                        e1 <- exists srcKey
+                        e2 <- exists tgtKey
+                        return (e1, e2)
+                    
+                    case existsReply of
+                        (Right True, Right True) -> do
+                            _ <- liftIO $ linkNodes (redisConn state) srcKey tgtKey (TE.encodeUtf8 rel)
+                            let res = toolSuccess req $ "Successfully linked " <> src <> " -> " <> tgt <> " (" <> rel <> ")"
+                            liftIO $ atomically $ writeTQueue queue (mkEvent res)
+                        (Right False, Right False) -> sendError queue req "engram_link failed: neither source nor target node exists"
+                        (Right False, _) -> sendError queue req $ "engram_link failed: source node does not exist: " <> src
+                        (_, Right False) -> sendError queue req $ "engram_link failed: target node does not exist: " <> tgt
+                        _ -> sendError queue req "engram_link failed: Redis error during existence check"
                 Nothing -> sendError queue req "Missing required arguments for engram_link"
         
         _ -> sendError queue req "Invalid tool name or arguments"
