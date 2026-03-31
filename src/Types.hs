@@ -115,7 +115,7 @@ instance ToJSON SearchResult where
                  , "related"    .= sRel
                  ]
 
--- | Final response sent to the LLM for engram_search
+-- | Final response sent to the LLM for search
 data SearchResponse = SearchResponse
     { fallbackUsed :: !Bool
     , results      :: ![SearchResult]

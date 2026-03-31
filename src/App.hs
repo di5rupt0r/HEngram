@@ -66,7 +66,7 @@ messagesHandler sid req = do
                         (Just (object
                             [ "tools" .=
                                 [ object
-                                    [ "name" .= ("engram_memorize" :: Text)
+                                    [ "name" .= ("memorize" :: Text)
                                     , "description" .= ("Memorize a piece of information into the knowledge graph" :: Text)
                                     , "inputSchema" .= object
                                         [ "type" .= ("object" :: Text)
@@ -79,7 +79,7 @@ messagesHandler sid req = do
                                         ]
                                     ]
                                 , object
-                                    [ "name" .= ("engram_search" :: Text)
+                                    [ "name" .= ("search" :: Text)
                                     , "description" .= ("Search for information in the knowledge graph" :: Text)
                                     , "inputSchema" .= object
                                         [ "type" .= ("object" :: Text)
@@ -91,7 +91,7 @@ messagesHandler sid req = do
                                         ]
                                     ]
                                 , object
-                                    [ "name" .= ("engram_link" :: Text)
+                                    [ "name" .= ("link" :: Text)
                                     , "description" .= ("Create a relationship between two nodes in the knowledge graph" :: Text)
                                     , "inputSchema" .= object
                                         [ "type" .= ("object" :: Text)
@@ -104,12 +104,26 @@ messagesHandler sid req = do
                                         ]
                                     ]
                                 , object
-                                    [ "name" .= ("engram_recall" :: Text)
+                                    [ "name" .= ("recall" :: Text)
                                     , "description" .= ("Retrieve a specific node from the knowledge graph by ID, including its full content and all typed outgoing relationships" :: Text)
                                     , "inputSchema" .= object
                                         [ "type" .= ("object" :: Text)
                                         , "properties" .= object
                                             [ "node_id" .= object ["type" .= ("string" :: Text)]
+                                            ]
+                                        , "required" .= (["node_id"] :: [Text])
+                                        ]
+                                    ]
+                                , object
+                                    [ "name" .= ("patch" :: Text)
+                                    , "description" .= ("Update fields of an existing node. Only provided fields are changed. Recomputes the embedding if content is updated." :: Text)
+                                    , "inputSchema" .= object
+                                        [ "type" .= ("object" :: Text)
+                                        , "properties" .= object
+                                            [ "node_id"   .= object ["type" .= ("string" :: Text)]
+                                            , "content"   .= object ["type" .= ("string" :: Text)]
+                                            , "domain"    .= object ["type" .= ("string" :: Text)]
+                                            , "node_type" .= object ["type" .= ("string" :: Text)]
                                             ]
                                         , "required" .= (["node_id"] :: [Text])
                                         ]
@@ -197,7 +211,7 @@ handleToolCall state queue req = do
             return (name, args)
     
     case mArgs of
-        Just ("engram_memorize", args) -> do
+        Just ("memorize", args) -> do
             let mData = (,,) <$> (getString "domain" args)
                              <*> (getString "content" args)
                              <*> (getString "node_type" args)
@@ -223,7 +237,7 @@ handleToolCall state queue req = do
                     
                     case mDuplicate of
                         Just (dupId, score) | score < (dedupThreshold state) -> do
-                            let res = toolSuccess req $ "Duplicate detected: this knowledge already exists as node " <> dupId <> " (similarity score: " <> T.pack (show score) <> "). Use engram_link to connect related concepts or engram_recall to inspect the existing node."
+                            let res = toolSuccess req $ "Duplicate detected: this knowledge already exists as node " <> dupId <> " (similarity score: " <> T.pack (show score) <> "). Use link to connect related concepts or recall to inspect the existing node."
                             liftIO $ atomically $ writeTQueue queue (mkEvent res)
                         _ -> do
                             uuid <- liftIO nextRandom
@@ -234,9 +248,9 @@ handleToolCall state queue req = do
                                 return ()
                             let res = toolSuccess req $ "Successfully memorized into domain '" <> normDom <> "' with node_type '" <> normType <> "' and ID " <> toText uuid
                             liftIO $ atomically $ writeTQueue queue (mkEvent res)
-                Nothing -> sendError queue req "Missing required arguments for engram_memorize"
+                Nothing -> sendError queue req "Missing required arguments for memorize"
         
-        Just ("engram_search", args) -> do
+        Just ("search", args) -> do
             let mQuery = getString "query" args
             case mQuery of
                 Just query -> do
@@ -277,7 +291,7 @@ handleToolCall state queue req = do
                     liftIO $ atomically $ writeTQueue queue (mkEvent res)
                 Nothing -> sendError queue req "Missing required argument 'query'"
         
-        Just ("engram_recall", args) -> do
+        Just ("recall", args) -> do
             let mNodeId = getString "node_id" args
             case mNodeId of
                 Just nodeId -> do
@@ -296,7 +310,7 @@ handleToolCall state queue req = do
                         _ -> sendError queue req $ "Node not found: " <> nodeId
                 Nothing -> sendError queue req "Missing required argument 'node_id'"
         
-        Just ("engram_link", args) -> do
+        Just ("link", args) -> do
             let mLink = (,,) <$> (getString "source_id" args)
                              <*> (getString "target_id" args)
                              <*> (getString "rel_type" args)
@@ -315,11 +329,65 @@ handleToolCall state queue req = do
                             _ <- liftIO $ linkNodes (redisConn state) srcKey tgtKey (TE.encodeUtf8 rel)
                             let res = toolSuccess req $ "Successfully linked " <> src <> " -> " <> tgt <> " (" <> rel <> ")"
                             liftIO $ atomically $ writeTQueue queue (mkEvent res)
-                        (Right False, Right False) -> sendError queue req "engram_link failed: neither source nor target node exists"
-                        (Right False, _) -> sendError queue req $ "engram_link failed: source node does not exist: " <> src
-                        (_, Right False) -> sendError queue req $ "engram_link failed: target node does not exist: " <> tgt
-                        _ -> sendError queue req "engram_link failed: Redis error during existence check"
-                Nothing -> sendError queue req "Missing required arguments for engram_link"
+                        (Right False, Right False) -> sendError queue req "link failed: neither source nor target node exists"
+                        (Right False, _) -> sendError queue req $ "link failed: source node does not exist: " <> src
+                        (_, Right False) -> sendError queue req $ "link failed: target node does not exist: " <> tgt
+                        _ -> sendError queue req "link failed: Redis error during existence check"
+                Nothing -> sendError queue req "Missing required arguments for link"
+        
+        Just ("patch", args) -> do
+            let mNodeId = getString "node_id" args
+            case mNodeId of
+                Just nodeId -> do
+                    let key = TE.encodeUtf8 nodeId
+                    reply <- liftIO $ runRedis (redisConn state) $ sendRequest ["HGETALL", key]
+                    case reply of
+                        Right (MultiBulk (Just fields)) | not (null fields) -> do
+                            let oldDom = lookupHGetAll "domain" fields
+                            
+                            let mNewDom  = getString "domain" args
+                                mNewType = getString "node_type" args
+                                mNewCont = getString "content" args
+                            
+                            let normDom   = normalizeDomain <$> mNewDom
+                                normType  = normalizeNodeType <$> mNewType
+                            
+                            let baseUpd = case normDom of
+                                            Just d  -> [("domain", TE.encodeUtf8 d)]
+                                            Nothing -> []
+                                          ++ case normType of
+                                            Just t  -> [("type", TE.encodeUtf8 t)]
+                                            Nothing -> []
+                            
+                            (finalUpd, finalChanged) <- case mNewCont of
+                                Just c -> do
+                                    rawVec <- liftIO $ getEmbedding c
+                                    let vec = vectorToByteString $ normalizeL2 $ take 384 rawVec
+                                    return (baseUpd ++ [("content", TE.encodeUtf8 c), ("vector", vec)], True)
+                                Nothing -> return (baseUpd, not (null baseUpd))
+
+                            if finalChanged
+                                then do
+                                    liftIO $ runRedis (redisConn state) $ do
+                                        let hsetArgs = concat [[TE.encodeUtf8 k, v] | (k, v) <- finalUpd]
+                                        _ <- (sendRequest (["HSET", key] ++ hsetArgs) :: Redis (Either Reply Reply))
+                                        case normDom of
+                                            Just d | d /= oldDom -> do
+                                                _ <- (sendRequest ["SREM", "manifest:domain:" <> TE.encodeUtf8 oldDom, key] :: Redis (Either Reply Reply))
+                                                _ <- (sendRequest ["SADD", "manifest:domain:" <> TE.encodeUtf8 d, key] :: Redis (Either Reply Reply))
+                                                return ()
+                                            _ -> return ()
+                                        return ()
+                                    
+                                    let updatedFieldNames = [k | (k, _) <- finalUpd]
+                                        msg = "Successfully patched node " <> nodeId <> ". Updated fields: " <> T.intercalate ", " updatedFieldNames
+                                    let res = toolSuccess req msg
+                                    liftIO $ atomically $ writeTQueue queue (mkEvent res)
+                                else do
+                                    let res = toolSuccess req $ "No fields to update for node " <> nodeId
+                                    liftIO $ atomically $ writeTQueue queue (mkEvent res)
+                        _ -> sendError queue req $ "patch failed: node not found: " <> nodeId
+                Nothing -> sendError queue req "Missing required argument 'node_id'"
         
         _ -> sendError queue req "Invalid tool name or arguments"
 

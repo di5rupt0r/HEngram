@@ -28,14 +28,18 @@ Many embedding systems rely on heavy Python stacks. HEngram uses Haskell's light
 
 ## 🛠️ Tools Provided
 
-HEngram exposes three primary tools to the LLM:
+HEngram exposes five primary tools to the LLM:
 
-1.  **`engram_memorize`**: Stores information into the graph.
+1.  **`memorize`**: Stores information into the graph.
     -   Inputs: `content`, `domain`, `node_type`.
-2.  **`engram_search`**: Performs a hybrid search.
+2.  **`search`**: Performs a hybrid search.
     -   Inputs: `query`, `domain` (optional).
-3.  **`engram_link`**: Connects two existing nodes.
+3.  **`link`**: Connects two existing nodes.
     -   Inputs: `source_id`, `target_id`, `rel_type`.
+4.  **`recall`**: Retrieves a specific node by ID.
+    -   Inputs: `node_id`.
+5.  **`patch`**: Updates fields of an existing node.
+    -   Inputs: `node_id` (required), `content`, `domain`, `node_type` (optional).
 
 ## ⚙️ Setup
 
